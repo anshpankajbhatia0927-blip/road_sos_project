@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>RoadSoS Live Map</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; }
+    #map { height: 100vh; width: 100vw; }
+    .panel {
+      position: absolute; top: 12px; left: 12px; z-index: 1000;
+      width: 350px; max-width: calc(100vw - 24px); background: white;
+      padding: 14px; border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,0.18);
+    }
+    .title { font-size: 21px; font-weight: bold; margin-bottom: 10px; color: #18202a; }
+    select, button, input {
+      width: 100%; padding: 10px; font-size: 15px; border-radius: 6px;
+      border: 1px solid #ccd3dc;
+    }
+    input { margin-top: 8px; }
+    button {
+      cursor: pointer; background: #d71920; color: white; border: none;
+      font-weight: bold; margin-top: 10px;
+    }
+    button.secondary { background: #1f6feb; }
+    button.dark { background: #343a40; }
+    button.sos { background: #b00020; animation: pulseSOS 1.2s infinite; }
+    @keyframes pulseSOS {
+      0% { box-shadow: 0 0 0 0 rgba(176, 0, 32, 0.6); }
+      70% { box-shadow: 0 0 0 10px rgba(176, 0, 32, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(176, 0, 32, 0); }
+    }
+    #status { margin-top: 10px; font-size: 13px; color: #3d4652; line-height: 1.4; }
+    #results { margin-top: 10px; max-height: 290px; overflow-y: auto; }
+    .manual-location { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e1e5ea; }
+    .offline-banner {
+      display: none; margin-top: 8px; padding: 8px; border-radius: 6px;
+      background: #fff3cd; color: #684b00; font-size: 13px; font-weight: bold;
+    }
+    .card {
+      border: 1px solid #e1e5ea; border-radius: 8px; padding: 10px;
+      margin-top: 8px; background: #fafafa; cursor: pointer;
+    }
+    .card:hover { background: #eef5ff; }
+    .card-title { font-weight: bold; color: #18202a; margin-bottom: 4px; }
+    .meta { font-size: 13px; color: #505b67; line-height: 1.4; }
+    .badge {
+      display: inline-block; padding: 2px 6px; border-radius: 5px;
+      font-size: 11px; font-weight: bold; margin-left: 4px;
+    }
+    .verified { background: #dff7e8; color: #176b35; }
+    .google { background: #e8f0fe; color: #174ea6; }
+    .osm { background: #fff3cd; color: #7a5900; }
+    .card-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .card-actions button { margin-top: 0; font-size: 12px; padding: 7px; }
+    .call-btn { background: #16833a; }
+    .route-btn { background: #1f6feb; }
+    .share-btn { background: #5c636a; }
+    @media (max-width: 600px) {
+      .panel { top: 8px; left: 8px; width: calc(100vw - 16px); }
+      #results { max-height: 220px; }
+    }
+  </style>
+</head>
+<body>
+<div class="panel">
+  <div class="title">RoadSoS</div>
+  <select id="service">
+    <option value="police">Police</option>
+    <option value="fire">Fire Station</option>
+    <option value="hospital">Hospital</option>
+    <option value="medical">Medical Store</option>
+    <option value="clinic">Clinic</option>
+    <option value="ambulance">Ambulance</option>
+    <option value="fuel">Fuel</option>
+    <option value="tow">Tow Service</option>
+    <option value="puncture">Puncture Repair</option>
+  </select>
+  <button class="sos" onclick="emergencySOS()">Emergency SOS</button>
+  <button class="secondary" onclick="callEmergency()">Call Emergency 112</button>
+  <button class="secondary" onclick="useIITMadrasLocation()">Use IIT Madras Location</button>
+  <button class="secondary" onclick="startVoiceInput()">Speak Emergency</button>
+  <button class="dark" onclick="findHelp()">Use GPS Location</button>
+  <div class="manual-location">
+    <input id="manualLat" type="number" step="any" placeholder="Latitude">
+    <input id="manualLon" type="number" step="any" placeholder="Longitude">
+    <button class="dark" onclick="useManualLocation()">Use Manual Location</button>
+  </div>
+  <div id="offlineBanner" class="offline-banner">Offline mode available</div>
+  <div id="status">Ready</div>
+  <div id="results"></div>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script>
+  const API_BASE = "http://127.0.0.1:8000";
+  const IIT_LAT = 12.9915;
+  const IIT_LON = 80.2337;
+  const NORMAL_LIMIT = 10;
+  const SOS_LIMIT = 20;
+  const OFFLINE_RADIUS_KM = 100;
+
+  const OFFLINE_SERVICES = [
+    { name: "Prime Hospital", service: "hospital", phone: "+917599676555", latitude: 29.229275205235847, longitude: 78.97449285508725, verified: true, available_24x7: true, address: "Local verified hospital", category: "private" },
+    { name: "Civil Hospital / L D Bhatt Government Hospital", service: "hospital", phone: "+918750202962", latitude: 29.219086, longitude: 78.964223, verified: true, available_24x7: true, address: "Kashipur local verified hospital", category: "government" },
+    { name: "Joshi Hospital", service: "hospital", phone: "+919410112882", latitude: 29.203525, longitude: 78.964908, verified: true, available_24x7: true, address: "Local verified hospital", category: "private" },
+    { name: "Global Hospital", service: "hospital", phone: "+917298511512", latitude: 29.201841, longitude: 78.973241, verified: true, available_24x7: true, address: "Local verified hospital", category: "private" },
+    { name: "Kashipur Police Station", service: "police", phone: "+915947274015", latitude: 29.210899, longitude: 78.960522, verified: true, available_24x7: true, address: "Kashipur Police Station", category: "government" },
+    { name: "ITI Police Station Kashipur", service: "police", phone: null, latitude: 29.189834, longitude: 78.993651, verified: true, available_24x7: true, address: "ITI Police Station, Kashipur", category: "government" },
+    { name: "Fire Brigade Kashipur", service: "fire", phone: "101", latitude: 29.200283, longitude: 78.976203, verified: true, available_24x7: true, address: "Kashipur Fire Brigade", category: "government" },
+    { name: "HP Petrol Pump", service: "fuel", phone: null, latitude: 29.262252, longitude: 79.008288, verified: true, available_24x7: false, address: "Local verified fuel station", category: "fuel" },
+    { name: "Shiv Sai Filling Station", service: "fuel", phone: null, latitude: 29.259182, longitude: 79.002979, verified: true, available_24x7: false, address: "Local verified fuel station", category: "fuel" },
+    { name: "Indian Oil Petrol Pump", service: "fuel", phone: null, latitude: 29.213025, longitude: 78.962563, verified: true, available_24x7: false, address: "Local verified fuel station", category: "fuel" },
+    { name: "Kukku Tyre House", service: "puncture", phone: "+919927065928", latitude: 29.203191, longitude: 78.946690, verified: true, available_24x7: false, address: "Local verified tyre and puncture repair", category: "puncture" },
+    { name: "Kukku Tyre House", service: "tow", phone: "+919927065928", latitude: 29.203191, longitude: 78.946690, verified: true, available_24x7: false, address: "Local verified tyre and towing help", category: "vehicle_service" },
+    { name: "Om Motors Maruti Suzuki Service Centre", service: "puncture", phone: null, latitude: 29.208082, longitude: 78.987767, verified: true, available_24x7: false, address: "Local verified vehicle and puncture support", category: "vehicle_service" },
+    { name: "Om Motors Maruti Suzuki Service Centre", service: "tow", phone: null, latitude: 29.208082, longitude: 78.987767, verified: true, available_24x7: false, address: "Local verified vehicle service centre", category: "vehicle_service" },
+    { name: "Bindal Hyundai", service: "puncture", phone: "+917948058623", latitude: 29.178235, longitude: 79.014666, verified: true, available_24x7: false, address: "Local verified Hyundai service and puncture support", category: "vehicle_service" },
+    { name: "Bindal Hyundai", service: "tow", phone: "+917948058623", latitude: 29.178235, longitude: 79.014666, verified: true, available_24x7: false, address: "Local verified Hyundai service centre", category: "vehicle_service" },
+    { name: "Adyar Police Station", service: "police", phone: "112", latitude: 13.0067, longitude: 80.2578, verified: true, available_24x7: true, address: "Adyar, Chennai", category: "government" },
+    { name: "Guindy Police Station", service: "police", phone: "112", latitude: 13.0063, longitude: 80.2209, verified: true, available_24x7: true, address: "Guindy, Chennai", category: "government" },
+    { name: "Fire and Rescue Services Guindy", service: "fire", phone: "101", latitude: 13.0080, longitude: 80.2206, verified: true, available_24x7: true, address: "Guindy, Chennai", category: "government" },
+    { name: "Fortis Malar Hospital", service: "hospital", phone: null, latitude: 13.0108, longitude: 80.2587, verified: true, available_24x7: true, address: "Adyar, Chennai", category: "private" },
+    { name: "Sri Balaji Hospital Guindy", service: "hospital", phone: null, latitude: 13.0100, longitude: 80.2125, verified: true, available_24x7: true, address: "Guindy, Chennai", category: "private" },
+    { name: "Apollo Pharmacy Adyar", service: "medical", phone: null, latitude: 13.0069, longitude: 80.2530, verified: true, available_24x7: false, address: "Adyar, Chennai", category: "pharmacy" },
+    { name: "MedPlus Pharmacy Velachery", service: "medical", phone: null, latitude: 12.9815, longitude: 80.2180, verified: true, available_24x7: false, address: "Velachery, Chennai", category: "pharmacy" },
+    { name: "Adyar Clinic", service: "clinic", phone: null, latitude: 13.0062, longitude: 80.2523, verified: true, available_24x7: false, address: "Adyar, Chennai", category: "clinic" },
+    { name: "Indian Oil Fuel Station Guindy", service: "fuel", phone: null, latitude: 13.0065, longitude: 80.2204, verified: true, available_24x7: false, address: "Guindy, Chennai", category: "fuel" },
+    { name: "HP Petrol Pump Adyar", service: "fuel", phone: null, latitude: 13.0069, longitude: 80.2551, verified: true, available_24x7: false, address: "Adyar, Chennai", category: "fuel" },
+    { name: "Velachery Car Care", service: "puncture", phone: null, latitude: 12.9818, longitude: 80.2206, verified: true, available_24x7: false, address: "Velachery, Chennai", category: "vehicle_service" },
+    { name: "Velachery Car Care", service: "tow", phone: null, latitude: 12.9818, longitude: 80.2206, verified: true, available_24x7: false, address: "Velachery, Chennai", category: "vehicle_service" },
+    { name: "Guindy Vehicle Service", service: "puncture", phone: null, latitude: 13.0052, longitude: 80.2192, verified: true, available_24x7: false, address: "Guindy, Chennai", category: "vehicle_service" },
+    { name: "Guindy Vehicle Service", service: "tow", phone: null, latitude: 13.0052, longitude: 80.2192, verified: true, available_24x7: false, address: "Guindy, Chennai", category: "vehicle_service" }
+  ];
+
+  const map = L.map("map").setView([20.5937, 78.9629], 5);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors"
+  }).addTo(map);
+
+  let userMarker = null;
+  let serviceMarkers = [];
+  let routeControl = null;
+  let currentLat = null;
+  let currentLon = null;
+
+  const statusBox = document.getElementById("status");
+  const resultsBox = document.getElementById("results");
+  const offlineBanner = document.getElementById("offlineBanner");
+
+  function updateNetworkStatus() {
+    offlineBanner.style.display = navigator.onLine ? "none" : "block";
+  }
+
+  function speak(message) {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.lang = "en-IN";
+    utterance.rate = 1;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function setStatus(message, shouldSpeak = true) {
+    statusBox.innerText = message;
+    if (shouldSpeak) speak(message);
+  }
+
+  async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
+    if (typeof options === "number") {
+      timeoutMs = options;
+      options = {};
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function distanceKm(lat1, lon1, lat2, lon2) {
+    const radius = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) *
+      Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
+    return Math.round(radius * 2 * Math.asin(Math.sqrt(a)) * 100) / 100;
+  }
+
+  function buildOfflineResults(lat, lon, service, limit = NORMAL_LIMIT) {
+    const results = OFFLINE_SERVICES
+      .filter(item => item.service === service)
+      .map(item => {
+        const distance = distanceKm(lat, lon, item.latitude, item.longitude);
+        return { ...item, distance_km: distance, eta_minutes: Math.max(1, Math.floor((distance / 40) * 60)), source: "local_verified" };
+      })
+      .filter(item => item.distance_km <= OFFLINE_RADIUS_KM)
+      .sort((a, b) => a.distance_km - b.distance_km)
+      .slice(0, limit);
+
+    return {
+      service,
+      count: results.length,
+      radius_used_meters: OFFLINE_RADIUS_KM * 1000,
+      google_fallback_used: false,
+      fallback_used: false,
+      fallback_service: null,
+      results
+    };
+  }
+
+  function inferServiceLocally(text) {
+    const cleaned = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ");
+    const rules = [
+      { service: "fire", keywords: ["fire", "smoke", "burning", "burn", "blast", "explosion", "aag"], message: "Fire emergency detected. Searching nearest fire station." },
+      { service: "hospital", keywords: ["accident", "crash", "collision", "injury", "injured", "bleeding", "blood", "unconscious", "fainted", "heart", "stroke", "fracture", "hurt", "chot", "khoon"], message: "Accident or medical emergency detected. Searching nearest hospital." },
+      { service: "puncture", keywords: ["puncture", "puncher", "pancher", "panchar", "flat tyre", "flat tire", "tyre burst", "tire burst", "flat wheel"], message: "Tyre puncture detected. Searching nearest puncture repair." },
+      { service: "tow", keywords: ["tow", "towing", "breakdown", "engine failure", "vehicle stopped", "car stopped", "not starting", "won t start", "cannot start", "engine problem", "car stuck", "gaadi band", "gadi band"], message: "Vehicle breakdown detected. Searching nearest tow service." },
+      { service: "fuel", keywords: ["fuel", "petrol", "diesel", "cng", "c n g", "see energy", "gas", "gas station", "filling station", "empty tank", "no petrol", "out of fuel", "no diesel", "petrol khatam", "fuel khatam", "cng pump", "cng station"], message: "Fuel request detected. Searching nearest fuel station." },
+      { service: "police", keywords: ["police", "robbery", "crime", "unsafe", "threat", "fight", "harassment", "stolen", "stole", "theft", "snatched", "snatching", "car stolen", "bike stolen", "vehicle stolen", "robbed", "loot", "looted", "chor", "chori", "someone took my", "bike chori", "car chori"], message: "Safety emergency detected. Searching nearest police station." },
+      { service: "medical", keywords: ["medicine", "pharmacy", "tablet", "medical store", "drug", "chemist"], message: "Medicine request detected. Searching nearest medical store." },
+      { service: "clinic", keywords: ["clinic", "doctor", "checkup", "check up"], message: "Doctor request detected. Searching nearest clinic." }
+    ];
+    return rules.find(rule => rule.keywords.some(keyword => cleaned.includes(keyword))) || {
+      service: "hospital",
+      message: "Emergency type unclear. Searching nearest hospital by default."
+    };
+  }
+
+  function callEmergency() {
+    setStatus("Opening emergency call 112");
+    window.location.href = "tel:112";
+  }
+
+  function useIITMadrasLocation() {
+    currentLat = IIT_LAT;
+    currentLon = IIT_LON;
+    document.getElementById("manualLat").value = currentLat;
+    document.getElementById("manualLon").value = currentLon;
+    setStatus("Using IIT Madras location");
+    loadServices(currentLat, currentLon);
+  }
+
+  function useManualLocation() {
+    const lat = parseFloat(document.getElementById("manualLat").value);
+    const lon = parseFloat(document.getElementById("manualLon").value);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      setStatus("Enter valid latitude and longitude");
+      return;
+    }
+    currentLat = lat;
+    currentLon = lon;
+    setStatus("Using manual location");
+    loadServices(currentLat, currentLon);
+  }
+
+  function findHelp() {
+    if (!navigator.geolocation) {
+      setStatus("GPS not supported by this browser");
+      return;
+    }
+    setStatus("Accessing your live GPS location");
+    resultsBox.innerHTML = "";
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        currentLat = pos.coords.latitude;
+        currentLon = pos.coords.longitude;
+        document.getElementById("manualLat").value = currentLat;
+        document.getElementById("manualLon").value = currentLon;
+        setStatus("Live GPS location detected");
+        loadServices(currentLat, currentLon);
+      },
+      () => setStatus("Location permission denied or GPS unavailable"),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  }
+
+  function startVoiceInput() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setStatus("Speech recognition not supported in this browser");
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.start();
+    setStatus("Listening. Tell me your emergency.");
+
+    recognition.onresult = async event => {
+      const text = event.results[0][0].transcript;
+      setStatus("Heard " + text);
+      try {
+        const url = `${API_BASE}/ai-assist?text=${encodeURIComponent(text)}`;
+        const ai = await fetchJsonWithTimeout(url, 8000);
+        document.getElementById("service").value = ai.service;
+        setStatus(ai.message);
+        currentLat && currentLon ? loadServices(currentLat, currentLon) : findHelp();
+      } catch (err) {
+        const ai = inferServiceLocally(text);
+        document.getElementById("service").value = ai.service;
+        setStatus(ai.message + " Local fallback used.");
+        currentLat && currentLon ? loadServices(currentLat, currentLon) : findHelp();
+      }
+    };
+    recognition.onerror = () => setStatus("Voice input failed. Try again or select manually.");
+  }
+
+  function clearMap() {
+    if (userMarker) {
+      map.removeLayer(userMarker);
+      userMarker = null;
+    }
+    serviceMarkers.forEach(marker => map.removeLayer(marker));
+    serviceMarkers = [];
+    if (routeControl) {
+      map.removeControl(routeControl);
+      routeControl = null;
+    }
+  }
+
+  function drawRoute(fromLat, fromLon, toLat, toLon) {
+    if (routeControl) map.removeControl(routeControl);
+    routeControl = L.Routing.control({
+      waypoints: [L.latLng(fromLat, fromLon), L.latLng(toLat, toLon)],
+      addWaypoints: false,
+      draggableWaypoints: false,
+      show: false,
+      lineOptions: { styles: [{ color: "#1f6feb", weight: 5 }] }
+    }).addTo(map);
+  }
+
+  function shareLocation(item) {
+    const text =
+      `RoadSoS help needed.\n` +
+      `My location: ${currentLat}, ${currentLon}\n` +
+      `Nearest ${item.service}: ${item.name}\n` +
+      `Service location: ${item.latitude}, ${item.longitude}`;
+    if (navigator.share) {
+      navigator.share({ title: "RoadSoS Location", text });
+    } else {
+      navigator.clipboard.writeText(text);
+      setStatus("Location details copied");
+    }
+  }
+
+  function openGoogleMaps(item) {
+    if (!currentLat || !currentLon || !item.latitude || !item.longitude) {
+      setStatus("Location missing. Try GPS, demo, or manual location again");
+      return;
+    }
+    const params = new URLSearchParams({
+      api: "1",
+      origin: `${currentLat},${currentLon}`,
+      destination: `${item.name} ${item.latitude},${item.longitude}`,
+      travelmode: "driving",
+      dir_action: "navigate"
+    });
+    window.open(`https://www.google.com/maps/dir/?${params.toString()}`, "_blank");
+  }
+
+  function sourceBadge(item) {
+    if (item.verified) return `<span class="badge verified">Verified</span>`;
+    if (item.source === "google_places") return `<span class="badge google">Google</span>`;
+    if (item.source === "openstreetmap") return `<span class="badge osm">OSM</span>`;
+    return "";
+  }
+
+  function createResultCard(item, index) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const phoneText = item.phone ? item.phone : "Not available";
+    const addressHtml = item.address ? `<div>Address: ${item.address}</div>` : "";
+    const availableHtml = item.available_24x7 ? `<div>Availability: 24x7</div>` : "";
+    card.innerHTML = `
+      <div class="card-title">${index + 1}. ${item.name} ${sourceBadge(item)}</div>
+      <div class="meta">
+        <div>Service: ${item.service}</div>
+        <div>Distance: ${item.distance_km} km</div>
+        <div>ETA: ${item.eta_minutes} min</div>
+        <div>Phone: ${phoneText}</div>
+        ${availableHtml}
+        ${addressHtml}
+        <div>Source: ${item.source}</div>
+      </div>
+      <div class="card-actions">
+        <button class="route-btn">Route</button>
+        <button class="call-btn">Call</button>
+        <button class="share-btn">Share</button>
+      </div>
+    `;
+    const buttons = card.querySelectorAll("button");
+    buttons[0].onclick = event => {
+      event.stopPropagation();
+      drawRoute(currentLat, currentLon, item.latitude, item.longitude);
+      openGoogleMaps(item);
+      setStatus(`Opening Google Maps route to ${item.name}`);
+    };
+    buttons[1].onclick = event => {
+      event.stopPropagation();
+      if (item.phone) {
+        setStatus(`Calling ${item.name}`);
+        window.location.href = `tel:${item.phone}`;
+      } else {
+        setStatus("Phone number not available. Opening Google Maps");
+        openGoogleMaps(item);
+      }
+    };
+    buttons[2].onclick = event => {
+      event.stopPropagation();
+      shareLocation(item);
+    };
+    card.onclick = () => {
+      drawRoute(currentLat, currentLon, item.latitude, item.longitude);
+      setStatus(`Routing to ${item.name}`);
+    };
+    return card;
+  }
+
+  function renderList(results, lat, lon, message, shouldDrawNearestRoute = true) {
+    clearMap();
+    resultsBox.innerHTML = "";
+    userMarker = L.marker([lat, lon]).addTo(map).bindPopup("You are here").openPopup();
+    map.setView([lat, lon], 14);
+
+    results.forEach((item, index) => {
+      const marker = L.marker([item.latitude, item.longitude])
+        .addTo(map)
+        .bindPopup(`
+          <b>${index + 1}. ${item.name}</b><br>
+          Service: ${item.service}<br>
+          Distance: ${item.distance_km} km<br>
+          ETA: ${item.eta_minutes} min<br>
+          Source: ${item.source}<br>
+          <small>Click marker to route</small>
+        `)
+        .on("click", () => {
+          drawRoute(lat, lon, item.latitude, item.longitude);
+          setStatus(`Routing to ${item.name}`);
+        });
+      serviceMarkers.push(marker);
+      resultsBox.appendChild(createResultCard(item, index));
+    });
+
+    if (results.length && shouldDrawNearestRoute) {
+      drawRoute(lat, lon, results[0].latitude, results[0].longitude);
+    }
+    if (serviceMarkers.length) {
+      const group = L.featureGroup([userMarker, ...serviceMarkers]);
+      map.fitBounds(group.getBounds().pad(0.25));
+    }
+    setStatus(message || `Found ${results.length} result(s). Nearest help is ${results[0].name}`);
+  }
+
+  function showFollowUps(nearest) {
+    const box = document.createElement("div");
+    box.className = "card";
+    box.innerHTML = `
+      <div class="card-title">Follow-up</div>
+      <div class="meta">Nearest help: ${nearest.name}</div>
+      <div class="card-actions">
+        <button class="call-btn">Call nearest</button>
+        <button class="share-btn">Share location</button>
+      </div>
+    `;
+    const buttons = box.querySelectorAll("button");
+    buttons[0].onclick = event => {
+      event.stopPropagation();
+      nearest.phone ? window.location.href = `tel:${nearest.phone}` : openGoogleMaps(nearest);
+    };
+    buttons[1].onclick = event => {
+      event.stopPropagation();
+      shareLocation(nearest);
+    };
+    resultsBox.prepend(box);
+  }
+
+  function renderResults(data, lat, lon, offlineMode = false) {
+    const results = (data.results || []).slice(0, NORMAL_LIMIT);
+    if (!results.length) {
+      setStatus("No nearby service found");
+      return;
+    }
+    let sourceText = data.google_fallback_used ? "Google fallback used" : "OSM/local results used";
+    if (data.fallback_used) {
+      sourceText += `. Showing ${data.fallback_service} because ${data.service} was not found`;
+    }
+    const visualMessage = offlineMode
+      ? `Offline mode: showing ${results.length} saved local ${data.service} result(s).`
+      : `Found ${results.length} nearest result(s). Radius: ${data.radius_used_meters / 1000} km. ${sourceText}.`;
+    renderList(results, lat, lon, visualMessage, !offlineMode);
+    speak(`Found ${results.length} results. Nearest help is ${results[0].name}`);
+    showFollowUps(results[0]);
+  }
+
+  async function loadServices(lat, lon) {
+    const service = document.getElementById("service").value;
+    setStatus(`Searching nearest ${service}`);
+    resultsBox.innerHTML = "";
+    clearMap();
+    try {
+      const url = `${API_BASE}/assist?lat=${lat}&lon=${lon}&service=${service}&allow_fallback=true&limit=${NORMAL_LIMIT}`;
+      const data = await fetchJsonWithTimeout(url, 15000);
+      if (data.error) {
+        setStatus(data.error);
+        return;
+      }
+      if (!data.results || data.results.length === 0) {
+        const offlineData = buildOfflineResults(lat, lon, service, NORMAL_LIMIT);
+        offlineData.results.length ? renderResults(offlineData, lat, lon, true) : setStatus("No nearby service found");
+        return;
+      }
+      localStorage.setItem(`lastRoadSoSResults:${service}`, JSON.stringify(data));
+      localStorage.setItem(`lastRoadSoSLat:${service}`, lat);
+      localStorage.setItem(`lastRoadSoSLon:${service}`, lon);
+      renderResults(data, lat, lon, false);
+    } catch (err) {
+      const cached = localStorage.getItem(`lastRoadSoSResults:${service}`);
+      const cachedLat = parseFloat(localStorage.getItem(`lastRoadSoSLat:${service}`));
+      const cachedLon = parseFloat(localStorage.getItem(`lastRoadSoSLon:${service}`));
+      if (cached && !Number.isNaN(cachedLat) && !Number.isNaN(cachedLon)) {
+        setStatus("Backend not reachable. Showing offline saved results");
+        renderResults(JSON.parse(cached), cachedLat, cachedLon, true);
+        return;
+      }
+      const offlineData = buildOfflineResults(lat, lon, service, NORMAL_LIMIT);
+      offlineData.results.length
+        ? renderResults(offlineData, lat, lon, true)
+        : setStatus(`Backend not reachable and no offline ${service} data found`);
+    }
+  }
+
+  function reloadForSelectedService() {
+    const lat = parseFloat(document.getElementById("manualLat").value);
+    const lon = parseFloat(document.getElementById("manualLon").value);
+    if (currentLat && currentLon) {
+      loadServices(currentLat, currentLon);
+    } else if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+      currentLat = lat;
+      currentLon = lon;
+      loadServices(currentLat, currentLon);
+    } else {
+      setStatus("Select a location first, then choose a service.", false);
+    }
+  }
+
+  async function shareOrCopySos(message) {
+    if (navigator.share) {
+      await navigator.share({ title: "RoadSoS SOS Alert", text: message });
+    } else {
+      await navigator.clipboard.writeText(message);
+      setStatus("SOS alert copied. Share it with nearby help.");
+    }
+  }
+
+  async function notifySos(nearest) {
+    const message =
+      `RoadSoS emergency alert.\n` +
+      `User location: ${currentLat}, ${currentLon}\n` +
+      `Nearest help: ${nearest.name}\n` +
+      `Help location: ${nearest.latitude}, ${nearest.longitude}\n` +
+      `Service: ${nearest.service}`;
+    try {
+      await shareOrCopySos(message);
+    } catch (err) {
+      setStatus("SOS sharing failed. Copy the location details manually.");
+    }
+  }
+
+  async function ensureLocationForSos() {
+    if (currentLat && currentLon) return true;
+    if (!navigator.geolocation) {
+      setStatus("GPS not supported. Enter manual latitude and longitude, then press Emergency SOS.");
+      return false;
+    }
+    try {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 12000,
+          maximumAge: 0
+        });
+      });
+      currentLat = position.coords.latitude;
+      currentLon = position.coords.longitude;
+      document.getElementById("manualLat").value = currentLat;
+      document.getElementById("manualLon").value = currentLon;
+      return true;
+    } catch (err) {
+      setStatus("GPS unavailable. Please allow location or enter manual coordinates before using SOS.");
+      return false;
+    }
+  }
+
+  function uniqueSortedResults(items) {
+    const seen = new Set();
+    return items
+      .filter(item => {
+        const key = `${item.service}:${item.name.toLowerCase()}:${Number(item.latitude).toFixed(4)}:${Number(item.longitude).toFixed(4)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => a.distance_km - b.distance_km);
+  }
+
+  async function getEmergencyServiceResults(service) {
+    const url = `${API_BASE}/assist?lat=${currentLat}&lon=${currentLon}&service=${service}&allow_fallback=true&limit=${NORMAL_LIMIT}`;
+    try {
+      const data = await fetchJsonWithTimeout(url, 20000);
+      if (data && data.results && data.results.length) return data.results;
+    } catch (err) {
+      console.error(service, err);
+    }
+    return buildOfflineResults(currentLat, currentLon, service, NORMAL_LIMIT).results;
+  }
+
+  function drawEmergencyGroupedResults(groupedResults, nearestOverall, notifyCard, actionCard) {
+    clearMap();
+    resultsBox.innerHTML = "";
+
+    userMarker = L.marker([currentLat, currentLon])
+      .addTo(map)
+      .bindPopup("SOS location")
+      .openPopup();
+
+    map.setView([currentLat, currentLon], 14);
+
+    const sectionLabels = {
+      hospital: "Hospitals",
+      police: "Police",
+      fire: "Fire Brigade"
+    };
+
+    const serviceOrder = ["hospital", "police", "fire"];
+    let visibleCount = 0;
+
+    resultsBox.appendChild(notifyCard);
+    resultsBox.appendChild(actionCard);
+
+    serviceOrder.forEach(service => {
+      const sectionResults = groupedResults[service] || [];
+      const section = document.createElement("div");
+      section.className = "card";
+      section.innerHTML = `
+        <div class="card-title">${sectionLabels[service]}</div>
+        <div class="meta">${
+          sectionResults.length
+            ? `Showing ${sectionResults.length} nearest ${sectionLabels[service].toLowerCase()} result(s)`
+            : `No nearby ${sectionLabels[service].toLowerCase()} found`
+        }</div>
+      `;
+      resultsBox.appendChild(section);
+
+      sectionResults.forEach((item, index) => {
+        visibleCount += 1;
+        const marker = L.marker([item.latitude, item.longitude])
+          .addTo(map)
+          .bindPopup(`
+            <b>${sectionLabels[service]} ${index + 1}: ${item.name}</b><br>
+            Distance: ${item.distance_km} km<br>
+            ETA: ${item.eta_minutes} min<br>
+            Source: ${item.source}<br>
+            <small>Click marker to route</small>
+          `)
+          .on("click", () => {
+            drawRoute(currentLat, currentLon, item.latitude, item.longitude);
+            setStatus(`Routing to ${item.name}`);
+          });
+
+        serviceMarkers.push(marker);
+        resultsBox.appendChild(createResultCard(item, index));
+      });
+    });
+
+    if (nearestOverall) {
+      drawRoute(currentLat, currentLon, nearestOverall.latitude, nearestOverall.longitude);
+    }
+
+    if (serviceMarkers.length) {
+      const group = L.featureGroup([userMarker, ...serviceMarkers]);
+      map.fitBounds(group.getBounds().pad(0.25));
+    }
+
+    setStatus(
+      `SOS ready. Showing ${visibleCount} structured emergency result(s). Nearest help is ${nearestOverall.name}.`
+    );
+  }
+
+  async function emergencySOS() {
+    setStatus("Emergency SOS activated. Checking your live GPS location.");
+    resultsBox.innerHTML = "";
+    if (!(await ensureLocationForSos())) return;
+
+    clearMap();
+    userMarker = L.marker([currentLat, currentLon]).addTo(map).bindPopup("SOS location").openPopup();
+    map.setView([currentLat, currentLon], 14);
+
+    const actionCard = document.createElement("div");
+    actionCard.className = "card";
+    actionCard.innerHTML = `
+      <div class="card-title">Emergency Actions</div>
+      <div class="meta">Call emergency service directly or share your SOS location.</div>
+      <div class="card-actions">
+        <button class="call-btn" onclick="window.location.href='tel:108'">Ambulance 108</button>
+        <button class="call-btn" onclick="window.location.href='tel:112'">Police 112</button>
+        <button class="call-btn" onclick="window.location.href='tel:101'">Fire 101</button>
+      </div>
+    `;
+    resultsBox.appendChild(actionCard);
+    setStatus("Finding nearest police stations, hospitals, and fire stations.");
+
+    const emergencyServices = ["hospital", "police", "fire"];
+    const responses = await Promise.all(emergencyServices.map(getEmergencyServiceResults));
+    const groupedResults = {};
+
+    emergencyServices.forEach((service, index) => {
+      groupedResults[service] = uniqueSortedResults(responses[index]).slice(0, NORMAL_LIMIT);
+    });
+
+    const nearestResults = uniqueSortedResults(Object.values(groupedResults).flat()).slice(0, SOS_LIMIT);
+
+    if (!nearestResults.length) {
+      setStatus("SOS ready, but no nearby emergency results were found.");
+      return;
+    }
+
+    const nearestOverall = nearestResults[0];
+    const notifyCard = document.createElement("div");
+    notifyCard.className = "card";
+    notifyCard.innerHTML = `
+      <div class="card-title">AI Assistant</div>
+      <div class="meta">Nearest emergency help is ${nearestOverall.name}, ${nearestOverall.distance_km} km away.</div>
+      <div class="card-actions">
+        <button class="share-btn">Notify / Share SOS</button>
+        <button class="route-btn">Route</button>
+      </div>
+    `;
+    const buttons = notifyCard.querySelectorAll("button");
+    buttons[0].onclick = () => notifySos(nearestOverall);
+    buttons[1].onclick = () => {
+      drawRoute(currentLat, currentLon, nearestOverall.latitude, nearestOverall.longitude);
+      openGoogleMaps(nearestOverall);
+    };
+
+    drawEmergencyGroupedResults(groupedResults, nearestOverall, notifyCard, actionCard);
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    updateNetworkStatus();
+    window.addEventListener("online", updateNetworkStatus);
+    window.addEventListener("offline", updateNetworkStatus);
+    document.getElementById("service").addEventListener("change", reloadForSelectedService);
+    setStatus("Choose a service, then use GPS, IIT Madras demo, or manual location.", false);
+  });
+</script>
+</body>
+</html>

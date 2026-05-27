@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>GPS Test</title>
+</head>
+<body>
+  <h2>Live GPS Test</h2>
+  <button onclick="getLocation()">Get My Location</button>
+  <p id="out">Waiting...</p>
+
+  <script>
+    function getLocation() {
+      if (!navigator.geolocation) {
+        document.getElementById("out").innerText = "GPS not supported";
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          document.getElementById("out").innerText =
+            `Latitude: ${lat}\nLongitude: ${lon}`;
+        },
+        (err) => {
+          document.getElementById("out").innerText =
+            "Permission denied or GPS error";
+        }
+      );
+    }
+  </script>
+</body>
+</html>
